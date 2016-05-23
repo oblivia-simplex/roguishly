@@ -3,7 +3,15 @@
 (print 'hi)
 
 
-(defstruct cell tile item mob)
+(defclass cell ()
+  ((tile :accessor tile
+         :initform #\SPACE)
+   (items :accessor item
+          :initform nil)
+   (vis :accessor vis
+        :initform nil)
+   (mob :accessor mob
+        :initform nil)))
 
 (defclass zone ()
   ((you :accessor you-are)
@@ -37,12 +45,14 @@
 
 (defclass you (mob)
   ((icon :accessor icon
-         :initform #\@)))
+         :initform #\@)
+   (glow :accessor glow
+         :initform 1)))
 
 (defvar *you* (make-instance 'you))
 (defvar *zonemap*)
 
-(defun passable (y x)
+(defun passable-p (y x)
   (not (or (< x 0)
            (< y 0)
            (>= x *width*)
@@ -60,7 +70,7 @@
   (if (passable y x)
       (setf (x you) x
             (y you) y)
-      (format t "PATH OBSTRUCTED AT ROW ~D, COL ~D~%" y x)))
+      (format t "PATH OBSTRUCTED AT Y: ~D, X: ~D~%" y x)))
 
 ;; refactor as macros?
 
@@ -83,12 +93,6 @@
   (let ((x (x you))
         (y (1+ (y you))))
     (try-move you y x)))
-        
-    
-
-
-
-
   
 
 (defparameter *height* 40)
@@ -100,15 +104,15 @@
   (let ((x 0)
         (y 0)
         (zm (make-array (list *height* *width*)
-                        :element-type 'cell
-                        :initial-element (make-cell :tile #\SPACE))))
+                        :element-type 'cell)))
+    (loop for i below (* *height* *width*) do
+         (setf (row-major-aref zm i) (make-instance 'cell)))
     (with-open-file (stream filename :direction :input)
       (loop for byte = (read-char stream nil nil)
          while byte do
            (format t "~c" byte)
-           (setf (aref zm y x)
-                 (make-cell :tile byte))
-           (if (char= byte #\newline)
+           (setf (tile (aref zm y x)) byte)
+           (if (char= byte #\NEWLINE)
                (progn
                  (setf x 0)
                  (incf y))
@@ -120,7 +124,7 @@
     #\o #\O))
 
 (defun block-p (cell)
-  (member (cell-tile cell) blocking-tiles))
+  (member (tile cell) blocking-tiles))
 
 
 (defun you-are-here (y x)
@@ -129,14 +133,15 @@
 
 (defun draw-tile (y x zm)
   (let* ((cell (aref zm y x))
-         (tile (cond ((cell-item cell) (icon (cell-item cell)))
-                    ((cell-mob cell) (icon (cell-mob cell)))
-                    ((you-are-here y x) (icon you))
-                    (:OTHERWISE (cell-tile cell)))))
-    (mvaddch y x tile)))
+         (tile (cond ((item cell) (icon (item cell)))
+                    ((mob cell) (icon (mob cell)))
+                    ((you-are-here y x) (icon *you*))
+                    ((vis cell) (tile cell))
+                    (:OTHERWISE #\SPACE))))
+      (mvaddch y x tile)))
           
 
-(defun display-map (zm)
+(defun display-map (&optional (zm *zonemap*))
   (erase)
   (loop for x below *width* do
        (loop for y below *height* do
@@ -151,6 +156,14 @@
     (setf *controls* (read stream))))
 
 
+(defun illuminate (zm src)
+  (let ((lx (max 0 (- (x src) (glow src))))
+        (hx (min *width* (+ (x src) (glow src))))
+        (ly (max 0 (- (y src) (glow src))))
+        (hy (min *height* (+ (y src) (glow src)))))
+    (loop for x from lx to hx do
+         (loop for y from ly to hy do
+              (setf (vis (aref zm y x)) 1)))))
 
 ;; ==== control loop ====
 
@@ -160,8 +173,8 @@
   (let ((moblist))
     (loop for y below *height* do
          (loop for x below *width* do
-              (if (cell-mob (aref zm y x))
-                  (push (cell-mob (aref zm y x)) moblist))))
+              (if (mob (aref zm y x))
+                  (push (mob (aref zm y x)) moblist))))
     moblist))
                         
   
@@ -169,7 +182,7 @@
 (defun update-zone (&optional (zm *zonemap*))
   (let ((moblist))
     (list-of-mobs zm)
-    (loop for mob in list-of-mobs do
+    (loop for mob in moblist do
          (eval (action mob)))))
 
 (defun control-loop ()
@@ -177,6 +190,14 @@
        (let ((move (cdr (assoc (code-char (getch)) *controls*))))
          (when move
            (eval move)
+           (illuminate *zonemap* *you*)
            (update-zone *zonemap*)
            (display-map *zonemap*)))))
 
+
+(defun run ()
+  (read-controls-from-file)
+  (read-zone-map "/tmp/map")
+  (connect-console)
+  (display-map)
+  (control-loop))
