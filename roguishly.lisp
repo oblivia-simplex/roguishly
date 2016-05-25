@@ -5,8 +5,10 @@
 ;; (defmacro pick (seq)
 ;;   '(elt seq (random (length seq))))
 
-(defmacro ~zone~ ()
-  '(zonemap (car *zones-above*)))
+;; (defmacro ~zone~ ()
+;;   '(zonemap (car *zones-above*)))
+
+
 
 
 (defvar *level*)
@@ -14,9 +16,10 @@
 (defun nop ())
 
 (defclass cell ()
-  ((tile :accessor tile
-         :initarg :tile
-         :initform #\#)
+  ((x :accessor x)
+   (y :accessor y)
+   (tile :accessor tile
+         :initarg :tile         :initform #\#)
    (color :accessor color
           :initarg :color
           :initform :CGRAY)
@@ -32,6 +35,8 @@
    (pass :accessor pass
          :initarg :pass
          :initform nil)
+   (you :accessor you
+        :initform nil)
    (mob :accessor mob
         :initarg :mob
         :initform nil)))
@@ -115,6 +120,10 @@
 (defvar *zones-above* '())
 (defvar *zones-below* '())
 
+;; =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+;; Movement of You
+;; =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
 (defun passable-p (y x)
   (and (>= x 0)
        (>= y 0)
@@ -128,11 +137,19 @@
 (defgeneric up (mob))
 (defgeneric down (mob))
 
+
+(defun vacate (y x)
+  (setf (you (aref (zonemap (car *zones-above*)) y x)) nil))
+(defun occupy (y x you)
+  (setf (you (aref (zonemap (car *zones-above*)) y x)) you))
+
 (defmethod try-move ((you you) y x)
   ;; nb: fails silently if obstacle is hit
   (cond ((passable-p y x)
+         (vacate (y you) (x you))
          (setf (x you) x
                (y you) y)
+         (occupy y x you)
          (funcall (event (aref (zonemap (car *zones-above*)) y x))))
         (:OTHERWISE (format t "PATH OBSTRUCTED AT Y: ~D, X: ~D~%" y x))))
 
@@ -158,10 +175,7 @@
         (y (1+ (y you))))
     (try-move you y x)))
   
-
-(defparameter *height* 40)
-(defparameter *width* 70)
-
+;; =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
 (defun clear-map ()
   (setf (zonemap (car *zones-above*)) (make-array (list *height* *width*)
@@ -199,30 +213,50 @@
   (member (tile cell) blocking-tiles))
 
 
-(defun you-are-here (y x)
-  (and (= (x *you*) x)
-       (= (y *you*) y)))
+;; (defun you-are-here (y x)
+;;   (and (= (x *you*) x)
+;;        (= (y *you*) y)))
 
-(defun draw-tile (y x zm)
-  (let* ((cell (aref zm y x))
+(defmethod draw-tile ((cell cell) y x)
+  (let* (;;(cell (aref zm y x))
          (tile (cond ((item cell) (icon (item cell)))
                      ((mob cell) (icon (mob cell)))
-                     ((you-are-here y x) (icon *you*))
+                     ((you cell) (icon (you cell)))
                      ((vis cell) (tile cell))
                      (:OTHERWISE #\SPACE)))
          (color (cond ((item cell) (color (item cell)))
                       ((mob cell) (color (mob cell)))
-                      ((you-are-here y x) (color *you*))
+                      ((you cell) (color (you cell)))
+                      
                       (:OTHERWISE (color cell)))))
     (attrset color)
     (mvaddch y x tile)))
           
 
-(defun display-map (&optional (zm (zonemap (car *zones-above*))))
+(defvar *window-width* 50)
+(defvar *window-height* 30)
+(defun slide (y x &key (focus *you*))
+  (let* ((mid-y (round (/ *window-height* 2)))
+         (mid-x (round (/ *window-width* 2)))
+         (dy (- mid-y (y focus)))
+         (dx (- mid-x (x focus)))
+         (slid-y (+ y dy))
+         (slid-x (+ x dx)))
+    (values
+     (if (< 0 slid-y *window-height*) slid-y -1)
+     (if (< 0 slid-x *window-width*) slid-x -1))))
+
+(defun display-map (&optional (zone (car *zones-above*)))
+  
   (erase)
+    
   (loop for x below *width* do
        (loop for y below *height* do
-            (draw-tile y x zm)))
+            (multiple-value-bind (slid-y slid-x)
+                (slide y x :focus *you*)
+              (if (and (> slid-x 0) (> slid-y 0))
+                  (draw-tile (aref (zonemap zone) y x)
+                             y x slid-y slid-x)))))
   (refresh))
 
 
@@ -247,10 +281,12 @@
 ;; =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 ;; Map generation
 ;; =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+(defparameter *height* #x100)
+(defparameter *width* #x100)
 
-(defparameter *room-max-size* 10)
+(defparameter *room-max-size* 20)
 (defparameter *room-min-size* 6)
-(defparameter *room-max-count* 30)
+(defparameter *room-max-count* 80)
 
 (defclass rect ()
   ((x :accessor x
@@ -407,7 +443,7 @@
            (eval move)
            (illuminate (zonemap (car *zones-above*)) *you*)
            (update-zone (zonemap (car *zones-above*)))
-           (display-map (zonemap (car *zones-above*)))))))
+           (display-map)))))
 
 
 ;; ------------------
@@ -432,16 +468,24 @@
   ;; check to see if the next level has been visited before, and can
   ;; be restored, or not.
   (cond (*zones-below*
-         (push (pop *zones-below*) *zones-above*))
+         (let ((coords))
+           (push (pop *zones-below*) *zones-above*)
+           (setf coords (seek-stairs 'up))
+           (setf (y *you*) (car coords)
+                 (x *you*) (cdr coords))))        
         (:OTHERWISE
          (push (generate-level *room-max-count*) *zones-above*)
          (add-stairs 'up :random nil :y (y *you*) :x (x *you*)))))
 
-(defun seek-downstairs ()
+(defun seek-stairs (direction)
   (let ((coords))
     (loop for y below *height* do
          (loop for x below *width* do
-              (when (char= (tile (aref (zonemap (car *zones-above*)) y x)) #\>)
+              (when (char= (tile (aref
+                                  (zonemap (car *zones-above*))
+                                  y x))
+                           (if (eq direction 'down) #\> #\<))
+                           
                 (setf coords (cons y x)))))
     coords))
 
@@ -451,7 +495,7 @@
   (cond ((cdr *zones-above*)
          (let ((coords))
            (push (pop *zones-above*) *zones-below*)
-           (setf coords (seek-downstairs))
+           (setf coords (seek-stairs 'down))
            (setf (y *you*) (car coords)
                  (x *you*) (cdr coords))
            (display-map)))
@@ -468,7 +512,7 @@
                  y))
          (sx (if random
                  (cdr (midpoint stairroom))
-                 x))
+                 (1- x)))
          (cell (aref (zonemap zone) sy sx)))
 
     (setf (color cell) :CBROWN)
