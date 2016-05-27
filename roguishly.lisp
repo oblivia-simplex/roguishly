@@ -2,8 +2,8 @@
  
 (print 'hi)
 
-;; (defmacro pick (seq)
-;;   '(elt seq (random (length seq))))
+(defmacro pick (seq)
+  `(elt ,seq (random ,(length seq))))
 
 ;; (defmacro ~zone~ ()
 ;;   '(zonemap (car *zones-above*)))
@@ -16,10 +16,15 @@
 (defun nop ())
 
 (defclass cell ()
-  ((x :accessor x)
-   (y :accessor y)
+  ((x :accessor x
+      :initarg :x
+      :initform 0)
+   (y :accessor y
+      :initarg :y
+      :initform 0)
    (tile :accessor tile
-         :initarg :tile         :initform #\#)
+         :initarg :tile
+         :initform #\#)
    (color :accessor color
           :initarg :color
           :initform :CGRAY)
@@ -51,6 +56,19 @@
          :initarg :pass
          :initform T)))
 
+(defclass rock-cell (cell)
+  ((pass :initform nil)
+   (color :initform :CGRAY)
+   (tile :initform (pick '(#\O #\o)))))
+
+(defclass water-cell (cell)
+  ((pass :initform T)
+   (color :initform :CLBLUE)
+   (tile :initform #\~)))
+
+
+         
+
 (defclass zone ()
   ((you :accessor you)
    (roomlist :accessor roomlist
@@ -63,12 +81,15 @@
 (defun init-zonemap ()
   (let ((zm (make-array (list *height* *width*)
                         :element-type 'cell)))
-    (loop for i below (* *height* *width*) do
-         (setf (row-major-aref zm i)
-               (make-instance 'cell
-                              :tile #\#
-                              :vis nil
-                              :pass nil)))
+    (loop for y below *height* do
+         (loop for x below *width* do
+              (setf (aref zm y x)
+                    (make-instance 'cell
+                                   :x x
+                                   :y y
+                                   :tile #\#
+                                   :vis nil
+                                   :pass nil))))
     zm))
 
 
@@ -109,7 +130,7 @@
           :initarg :color)
    (glow :accessor glow
          :initarg :glow
-         :initform 2)))
+         :initform 6)))
 
 
 (defmethod pick-a-room ((zone zone))
@@ -210,7 +231,8 @@
     #\o #\O #\SPACE))
 
 (defun block-p (cell)
-  (member (tile cell) blocking-tiles))
+  (or (not (pass cell))
+      (member (tile cell) blocking-tiles)))
 
 
 ;; (defun you-are-here (y x)
@@ -227,7 +249,7 @@
          (color (cond ((item cell) (color (item cell)))
                       ((mob cell) (color (mob cell)))
                       ((you cell) (color (you cell)))
-                      
+                      ((can-see *you* (y cell) (x cell)) :CWHITE)
                       (:OTHERWISE (color cell)))))
     (attrset color)
     (mvaddch y x tile)))
@@ -256,7 +278,7 @@
                 (slide y x :focus *you*)
               (if (and (> slid-x 0) (> slid-y 0))
                   (draw-tile (aref (zonemap zone) y x)
-                             y x slid-y slid-x)))))
+                             slid-y slid-x)))))
   (refresh))
 
 
@@ -267,14 +289,15 @@
     (setf *controls* (read stream))))
 
 
-(defun illuminate (zm src)
-  (let ((lx (max 0 (- (x src) (glow src))))
-        (hx (min (1- *width*) (+ (x src) (glow src))))
-        (ly (max 0 (- (y src) (glow src))))
-        (hy (min (1- *height*) (+ (y src) (glow src)))))
-    (loop for x from lx to hx do
-         (loop for y from ly to hy do
-              (setf (vis (aref zm y x)) 1)))))
+;; (defun illuminate2 (zm src)
+;;   (let ((lx (max 0 (- (x src) (glow src))))
+;;         (hx (min (1- *width*) (+ (x src) (glow src))))
+;;         (ly (max 0 (- (y src) (glow src))))
+;;         (hy (min (1- *height*) (+ (y src) (glow src)))))
+;;     (loop for x from lx to hx do
+;;          (loop for y from ly to hy do
+;;               (setf (vis (aref zm y x)) 1)))))
+
 
 
 
@@ -413,7 +436,120 @@
                  (setf (aref (zonemap zone) y x)
                        (make-instance 'floortile))))))
                                       
-                        
+
+
+
+(defmethod scatter-special-cells ((zone zone) celltype number)
+  (loop repeat number do
+       (let ((y (random *height*))
+             (x (random *width*)))
+         (setf (aref (zonemap zone) y x)
+               (make-instance celltype)))))
+
+
+(defun random-walk-path (zone start-y start-x steps)
+  (let ((path (list (cons start-y start-x)))
+        (x start-x)
+        (y start-y))
+    (loop repeat steps do
+         (if (zerop (random 2))
+             (setf y (bound (+ start-y (pick '(1 -1))) 0 (1- *height*)))
+             (setf x (bound (+ start-x (pick '(1 -1))) 0 (1- *width*))))
+         (unless (block-p (aref (zonemap zone) y x))
+           (setf start-x x)
+           (setf start-y y)
+           (push (cons y x) path)))
+    path))
+
+
+        
+    
+
+(defun bound (num min max)
+  (cond ((< num min) min)
+        ((> num max) max)
+        (t num)))
+
+(defmethod scatter-clumps ((zone zone) celltype number maxsize)
+  (loop repeat number do
+       (let* ((y (random *height*))
+              (x (random *width*))
+              (clump (random-walk-path zone y x maxsize)))
+         (loop for point in clump do
+              (setf (aref (zonemap zone) (car point) (cdr point))
+                    (make-instance celltype))))))
+         
+             
+         
+
+;; === geometry stuff ===
+
+(defun ray (y1 x1 y2 x2)
+  (let* ((path (list (cons y1 x1)))
+         (y-dir (if (< y1 y2) 1 -1))
+         (x-dir (if (< x1 x2) 1 -1))
+         (ratio (abs (if (zerop (- x1 x2))
+                         1 (/ (- y1 y2) (- x1 x2)))))
+         (y-step (numerator ratio))
+         (x-step (denominator ratio)))
+    (loop do
+         (flet ((y-turn ()
+                    (loop repeat (abs y-step)
+                       while (/= y1 y2) do
+                         (incf y1 y-dir)
+                         (push (cons y1 x1) path)))
+                (x-turn ()
+                    (loop repeat (abs x-step)
+                       while (/= x1 x2) do
+                         (incf x1 x-dir)
+                         (push (cons y1 x1) path))))
+           (if (zerop (random 2))
+               (y-turn)
+               (x-turn)))
+;;         (format t "[Y1: ~D, X1: ~D] [Y2: ~D, X2: ~D] y-step: ~d, x-step ~d~%" y1 x1 y2 x2 y-step x-step) ;;;;;;;;
+       until (and (= x1 x2) (= y1 y2)))
+    path))
+
+
+
+
+
+(defun visible-from (subj-y subj-x obj-y obj-x)
+  ;; assuming, as a simplification, that there is no glass in this
+  ;; world. if we want transparent solids, we just need to add another
+  ;; list like the block tiles list, and a transparent-p toplevel func
+  (flet ((transparent-p (coords)
+           (not (block-p (aref (zonemap (car *zones-above*))
+                               (car coords) (cdr coords))))))
+    (let ((line-of-sight (cdr (ray subj-y subj-x obj-y obj-x))))
+      ;; (FORMAT T "Y: ~D, X: ~D~%LINE: ~A~%" subj-y subj-x line-of-sight)
+      ;; (loop for coord in line-of-sight do
+      ;;      (format t "~a => ~a~%" coord (transparent-p coord)))
+      (every #'transparent-p line-of-sight))))
+
+(defmethod can-see ((mob mob) y x)
+  (or (and (<= (abs (- (y mob) y)) 1)
+           (<= (abs (- (x mob) x)) 1))
+      (and (<= (length (ray y x (y mob) (x mob)))
+               (glow mob))
+           (visible-from (y mob) (x mob) y x))))
+        
+(defun illuminate (zone src)
+  (let* ((span (* 2 (glow src)))
+         (lx (max 0 (- (x src) span)))
+         (hx (min (1- *width*) (+ (x src) span)))
+         (ly (max 0 (- (y src) span)))
+         (hy (min (1- *height*) (+ (y src) span))))
+    (loop for x from lx to hx do
+         (loop for y from ly to hy do
+              (if (can-see src y x)
+                  (setf (vis (aref (zonemap zone) y x)) 1))))))
+
+    
+        
+              
+         
+
 ;; ==== control loop ====
 
 
@@ -441,7 +577,7 @@
        (let ((move (cdr (assoc (code-char (getch)) *controls*))))
          (when move
            (eval move)
-           (illuminate (zonemap (car *zones-above*)) *you*)
+           (illuminate (car *zones-above*) *you*)
            (update-zone (zonemap (car *zones-above*)))
            (display-map)))))
 
@@ -454,6 +590,10 @@
   (let ((newzone (make-instance 'zone)))
     (setf (roomlist newzone) (make-rooms room-max-count))
     (add-rooms-to-map newzone)
+    ;;;; parameterize this stuff later
+    (scatter-special-cells newzone 'rock-cell 1000)
+    (scatter-clumps newzone 'water-cell 1000 50)
+    ;;;;
     (loop for r on (roomlist newzone) do
          (if (cdr r)
              (make-path (car r) (cadr r) newzone)
@@ -536,3 +676,7 @@
   (control-loop))
 
 
+(defmethod reveal-map ((zone zone) on-off)
+  ;; for debugging
+  (loop for i below (* *height* *width*) do
+       (setf (vis (row-major-aref (zonemap zone) i)) on-off)))
